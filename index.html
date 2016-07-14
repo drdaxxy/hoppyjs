@@ -1,0 +1,232 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="x-ua-compatible" content="ie=edge">
+    <title>#ProjectHoppy v0.01 pre-alpha "Hoppy.js"</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link href='https://fonts.googleapis.com/css?family=Open+Sans' rel='stylesheet' type='text/css'>
+    <style type="text/css">
+      body {
+        background-color: #000;
+        color: #fff;
+      }
+      h1 {
+        font-family: 'Open Sans', sans-serif;
+        text-align: center;
+      }
+      #gameCanvas {
+        margin-left: auto;
+        margin-right: auto;
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <script src="https://code.jquery.com/jquery-3.1.0.min.js" integrity="sha256-cCueBR6CsyA4/9szpPfrX3s49M9vUU5BgtiJj06wt/s=" crossorigin="anonymous"></script>
+    <!--<script src="nsslexer.js"></script>
+    <script src="nssparser.js"></script>
+    <script src="nssinterpreter.js"></script>-->
+    <script>
+      $(document).ready(function() {
+        var w = new Worker("scriptworker.js");
+        var assetQueue = [
+          "cg/sys/title/nitroplus.jpg",
+          "cg/sys/title/5gk.jpg",
+          "bg127.jpg"
+        ];
+        var assetQueueSize = assetQueue.length;
+        var assetsLoaded = 0;
+
+        var assetCache = {};
+        var eventQueue = [];
+        var state = {};
+        var processes = { fade: {} };
+
+        var gameCanvas = document.getElementById("gameCanvas");
+        var drawCtx = gameCanvas.getContext("2d");
+
+        function request(ev) {
+          switch(ev.operation) {
+            case "PushText":
+              if(ev.objectGlob in state)
+                state[ev.objectGlob].visible = true;
+              break;
+            default:
+              // throw new SomethingException();
+          }
+        }
+
+        function processQueue(frameTime) {
+          while(ev = eventQueue.shift()) {
+            $("#log").append("Processing event (fired by interpreter): " + ev.type + "\n");
+            switch(ev.type) {
+              // I should really have classes for these but oh well
+              case "CreateTexture":
+                state[ev.objectName] = {
+                  type: "texture",
+                  name: ev.objectName,
+                  img: assetCache[ev.filePath],
+                  zLevel: ev.zLevel,
+                  xOffset: ev.xOffset,
+                  yOffset: ev.yOffset,
+                  alpha: 1
+                };
+                break;
+
+              case "CreateText":
+                state[ev.objectName] = {
+                  type: "text",
+                  name: ev.objectName,
+                  text: ev.text,
+                  xOffset: ev.xOffset,
+                  yOffset: ev.yOffset,
+                  visible: false,
+                  alpha: 1
+                };
+                break;
+
+              case "Fade":
+                if(ev.objectGlob in state) {
+                  if(ev.time == 0) {
+                    // just a hack, I know I should be queueing these properly instead
+                    state[ev.objectGlob].alpha = 0;
+                  } else {
+                    processes.fade[ev.objectGlob] = {
+                      startAlpha: state[ev.objectGlob].alpha,
+                      endAlpha: ev.alpha / 1000,
+                      startTime: frameTime,
+                      duration: ev.time
+                    };
+                  }
+                }
+                break;
+
+              case "Delete":
+                // todo: actually glob
+                delete state[ev.objectGlob];
+                break;
+
+              case "Request":
+                request(ev);
+                break;
+
+
+              default:
+                // throw new SomethingException("unexpected event");
+            }
+          }
+        }
+
+        function runProcesses(frameTime) {
+          // duplicate keys so we can remove fades for deleted objects
+          // also all of this is terrible
+          var fades = Object.keys(processes.fade).slice();
+          for(var i = 0; i < fades.length; i++) {
+            var name = fades[i];
+            if(!(name in state)) {
+              delete processes.fade[name];
+              continue;
+            }
+            var proc = processes.fade[name];
+            if(proc.startTime + proc.duration <= frameTime) {
+              state[name].alpha = proc.endAlpha;
+              delete processes.fade[name];
+              continue;
+            }
+            var progress = (frameTime - proc.startTime) / proc.duration;
+            state[name].alpha = proc.startAlpha + 
+              (progress * (proc.endAlpha - proc.startAlpha));
+          }
+        }
+
+        function drawFrame(frameTime) {
+          drawCtx.fillRect(0,0,1280,720);
+          drawCtx.fillStyle = "black";
+          drawCtx.globalAlpha = 1;
+
+          var keys = Object.keys(state);
+          keys = keys.sort(function(a, b) {
+            // does this actually work for objects that have no Z level?
+            if ("zLevel" in state[a] && "zLevel" in state[b]) {
+              return state[a].zLevel > state[b].zLevel;
+            }
+            return 0;
+          });
+
+          for(var i = 0; i < keys.length; i++) {
+            drawCtx.fillStyle = "black";
+            drawCtx.globalAlpha = 1;
+
+            var obj = state[keys[i]];
+            if("alpha" in obj) drawCtx.globalAlpha = obj.alpha;
+            switch(obj.type) {
+              case "text":
+                if(!obj.visible) continue;
+                drawCtx.font = "24px Arial";
+                var fs = drawCtx.fillStyle;
+                drawCtx.fillStyle = "white";
+                drawCtx.fillText(obj.text, obj.xOffset, obj.yOffset);
+                drawCtx.fillStyle = fs;
+                break;
+              case "texture":
+                drawCtx.drawImage(obj.img, obj.xOffset, obj.yOffset);
+                break;
+              default:
+                break;
+            }
+          }
+        }
+
+        function doFrame() {
+          var frameTime = window.performance.now();
+          processQueue(frameTime);
+          runProcesses(frameTime);
+          drawFrame(frameTime);
+          window.requestAnimationFrame(doFrame);
+        }
+
+        function loadScript() {
+          $.get("boot_utf8.nss", function(scriptText) {
+            $("#loading").remove();
+            w.onmessage = function(ev) {
+              if(ev.data.type == "log") {
+                $("#log").append(ev.data.message);
+              } else eventQueue.push(ev.data);
+            };
+            $(window).keypress(function() {
+              w.postMessage({ type: "keypress" });
+            });
+            $(window).click(function() {
+              w.postMessage({ type: "click" });
+            });
+            window.requestAnimationFrame(doFrame);
+            $("#log").append("Relay [CONFIDENTIAL]\n");
+            w.postMessage({ type: "run_script", script: scriptText});
+          });
+        }
+
+        for (var i = 0; i < assetQueueSize; i++) {
+          var path = assetQueue[i];
+          var img = new Image();
+          $(img).on('error', function() {
+            alert("Error loading " + path);
+          });
+          $(img).on('load', function() {
+            assetsLoaded++;
+            $("#log").append("Asset loaded: " + path + "\n");
+            if(assetsLoaded == assetQueueSize) {
+              loadScript();
+            }
+          });
+          assetCache[path] = img;
+          img.src = path;
+        }
+      });
+    </script>
+    <h1>#ProjectHoppy v0.01 pre-<sub>pre-<sub>pre-<sub>pre-</sub></sub></sub>alpha "Hoppy.js"</h1>
+    <h1 id="loading">Loading assets... (RIP dialup users)</h1>
+    <canvas id="gameCanvas" width="1280" height="720"></canvas>
+    <pre id="log"></pre>
+  </body>
+</html>
